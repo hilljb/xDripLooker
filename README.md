@@ -21,6 +21,10 @@ Just getting this working and then will improve whatever needs improving. While 
 
 Getting the config into xDrip is a bit tedious. See gemini conversation and clean this up when that works.
 
+Remove the SRV connection string and you get the full old-school Python connection string.
+
+Update the network access. During the setup process, your IP address will be used as the only one capable of conencting to the DB. Document how to change that here.
+
 ## Creating a Test Environment
 
 ` conda create --name xdrip python=3.1`
