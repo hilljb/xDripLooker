@@ -19,6 +19,8 @@ Just getting this working and then will improve whatever needs improving. While 
 - After saving the configuration, I was asked to create a database user and password. I placed those into my password manager and created the user.
 - Choose a conenction method. I am using the MongoDB drivers. I will allow xDrip+ to use its existing drivers, but will use Python for testing.
 
+Getting the config into xDrip is a bit tedious. See gemini conversation and clean this up when that works.
+
 ## Creating a Test Environment
 
 ` conda create --name xdrip python=3.1`
