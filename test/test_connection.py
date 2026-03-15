@@ -8,16 +8,60 @@ config_path = os.path.join(os.path.dirname(__file__), "config.json")
 with open(config_path) as f:
     config = json.load(f)["mongo"]
 
-uri = (
+# --- URI 1: Newer SRV format ---
+# Used by most modern drivers; a single hostname, DNS resolves the replica set members.
+uri_srv = (
     f"mongodb+srv://{config['username']}:{config['password']}"
     f"@{config['host']}/?appName={config['app_name']}"
 )
 
-# Create a new client and connect to the server
-client = MongoClient(uri, server_api=ServerApi('1'))
-# Send a ping to confirm a successful connection
-try:
-    client.admin.command('ping')
-    print("Pinged your deployment. You successfully connected to MongoDB!")
-except Exception as e:
-    print(e)
+# --- URI 2: Older standard format ---
+# Used by drivers that do not support the +srv scheme (e.g. some mobile SDKs).
+# Lists each replica-set shard host explicitly with its port.
+shards_str = ",".join(f"{s}:{config['port']}" for s in config["shards"])
+uri_standard = (
+    f"mongodb://{config['username']}:{config['password']}"
+    f"@{shards_str}/"
+    f"?authSource={config['auth_source']}"
+    f"&tls=true"
+    f"&retryWrites=true"
+    f"&w=majority"
+)
+
+
+def test_srv():
+    """Test connection using the modern mongodb+srv URI."""
+    print("\n--- Testing SRV connection (modern driver format) ---")
+    print(f"Host: {config['host']}")
+    client = None
+    try:
+        client = MongoClient(uri_srv, server_api=ServerApi("1"))
+        client.admin.command("ping")
+        print("SUCCESS: Pinged deployment via SRV URI.")
+    except Exception as e:
+        print(f"FAILED: {e}")
+    finally:
+        if client:
+            client.close()
+
+
+def test_standard():
+    """Test connection using the older standard URI with explicit shard hosts."""
+    print("\n--- Testing standard connection (older driver format) ---")
+    print(f"Shards: {config['shards']}")
+    print(f"Port:   {config['port']}")
+    client = None
+    try:
+        client = MongoClient(uri_standard)
+        client.admin.command("ping")
+        print("SUCCESS: Pinged deployment via standard URI.")
+    except Exception as e:
+        print(f"FAILED: {e}")
+    finally:
+        if client:
+            client.close()
+
+
+if __name__ == "__main__":
+    test_srv()
+    test_standard()
