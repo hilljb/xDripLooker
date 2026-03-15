@@ -1,10 +1,17 @@
+import json
+import os
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
-uri = "mongodb+srv://"
-uri += "jasonbrandonhill_xdrip:"
-uri += "R8bBR7PECHe3o3rr"
-uri += "@cluster0.ltff1ty.mongodb.net/?appName=Cluster0"
+# Load connection config from local config file (not committed to version control)
+config_path = os.path.join(os.path.dirname(__file__), "config.json")
+with open(config_path) as f:
+    config = json.load(f)["mongo"]
+
+uri = (
+    f"mongodb+srv://{config['username']}:{config['password']}"
+    f"@{config['host']}/?appName={config['app_name']}"
+)
 
 # Create a new client and connect to the server
 client = MongoClient(uri, server_api=ServerApi('1'))
