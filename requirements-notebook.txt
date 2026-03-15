@@ -1,0 +1,9 @@
+# ============================================================
+# Prefer conda for all installs (see environment.yml):
+#   conda env create -f environment.yml
+#   conda activate xdrip
+#
+# This file is a pip fallback for notebook extras ONLY.
+# ============================================================
+jupyter==1.1.1
+jupyterlab==4.5.6
