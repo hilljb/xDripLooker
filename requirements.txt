@@ -1,9 +1,15 @@
-# Core runtime dependencies (pinned to versions used in development)
-# Install with:  pip install -r requirements.txt
+# ============================================================
+# Prefer conda for all installs (see environment.yml):
+#   conda env create -f environment.yml
+#   conda activate xdrip
+#
+# This file is provided as a pip fallback ONLY for environments
+# where conda is not available.
+# ============================================================
+
+# MongoDB driver + DNS for mongodb+srv:// URIs
 pymongo==4.16.0
 dnspython==2.8.0
-pandas==3.0.1
 
-# Notebook / interactive analysis
-# Install with:  pip install -r requirements.txt -r requirements-notebook.txt
-# (see requirements-notebook.txt)
+# Data analysis
+pandas==3.0.1
