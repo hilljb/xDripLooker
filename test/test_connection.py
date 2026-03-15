@@ -1,9 +1,29 @@
+"""
+MongoDB connection tests for xDripLooker.
+
+Tests both connection URI formats:
+  - SRV format  (modern drivers, mongodb+srv://)
+  - Standard format (older drivers, explicit shard hosts, mongodb://)
+
+Prerequisites:
+  1. Copy test/config.json.example to test/config.json and fill in your credentials.
+     config.json is gitignored and will never be committed.
+
+Run all tests:
+  pytest test/
+
+Run directly (also prints connection details):
+  python test/test_connection.py
+"""
+
 import json
 import os
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 
-# Load connection config from local config file (not committed to version control)
+# ---------------------------------------------------------------------------
+# Load credentials from local config (not committed to version control)
+# ---------------------------------------------------------------------------
 config_path = os.path.join(os.path.dirname(__file__), "config.json")
 with open(config_path) as f:
     config = json.load(f)["mongo"]
@@ -28,9 +48,12 @@ uri_standard = (
     f"&w=majority"
 )
 
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 def test_srv():
-    """Test connection using the modern mongodb+srv URI."""
+    """Test connection using the modern mongodb+srv URI (pytest + direct run)."""
     print("\n--- Testing SRV connection (modern driver format) ---")
     print(f"Host: {config['host']}")
     client = None
@@ -40,13 +63,14 @@ def test_srv():
         print("SUCCESS: Pinged deployment via SRV URI.")
     except Exception as e:
         print(f"FAILED: {e}")
+        raise
     finally:
         if client:
             client.close()
 
 
 def test_standard():
-    """Test connection using the older standard URI with explicit shard hosts."""
+    """Test connection using the older standard URI with explicit shard hosts (pytest + direct run)."""
     print("\n--- Testing standard connection (older driver format) ---")
     print(f"Shards: {config['shards']}")
     print(f"Port:   {config['port']}")
@@ -57,6 +81,7 @@ def test_standard():
         print("SUCCESS: Pinged deployment via standard URI.")
     except Exception as e:
         print(f"FAILED: {e}")
+        raise
     finally:
         if client:
             client.close()

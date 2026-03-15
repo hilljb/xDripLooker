@@ -1,0 +1,4 @@
+# Notebook / interactive analysis extras
+# Install with:  pip install -r requirements.txt -r requirements-notebook.txt
+jupyter==1.1.1
+jupyterlab==4.5.6

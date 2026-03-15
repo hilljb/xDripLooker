@@ -1,0 +1,9 @@
+# Core runtime dependencies (pinned to versions used in development)
+# Install with:  pip install -r requirements.txt
+pymongo==4.16.0
+dnspython==2.8.0
+pandas==3.0.1
+
+# Notebook / interactive analysis
+# Install with:  pip install -r requirements.txt -r requirements-notebook.txt
+# (see requirements-notebook.txt)

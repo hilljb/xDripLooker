@@ -1,0 +1,29 @@
+[project]
+name = "xDripLooker"
+version = "0.1.0"
+description = "Visualizing xDrip+ continuous glucose monitor data in Looker via MongoDB"
+requires-python = ">=3.12"
+
+# Core runtime dependencies
+dependencies = [
+    "pymongo>=4.16",
+    "dnspython>=2.8",   # Required for mongodb+srv:// DNS resolution
+    "pandas>=3.0",
+]
+
+[project.optional-dependencies]
+# Interactive analysis
+notebook = [
+    "jupyter>=1.1",
+    "jupyterlab>=4.5",
+]
+# Development / testing
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+# Only discover files named test_*.py (skip config templates, etc.)
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
