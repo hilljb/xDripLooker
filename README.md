@@ -34,7 +34,9 @@ xDripLooker/
 - After saving the configuration, I was asked to create a database user and password. I placed those into my password manager and created the user.
 - Choose a connection method. I am using the MongoDB drivers. I will allow xDrip+ to use its existing drivers, but will use Python for testing.
 
-Getting the config into xDrip is a bit tedious. See gemini conversation and clean this up when that works.
+Getting the config into xDrip is a bit tedious. See gemini conversation and clean this up when that works. You'll need the shards info.
+
+Create the full connection string for xDrip using the shards.
 
 Update the network access. During the setup process, your IP address will be used as the only one capable of connecting to the DB. Document how to change that here.
 
