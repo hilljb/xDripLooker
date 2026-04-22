@@ -34,13 +34,38 @@ xDripLooker/
 - After saving the configuration, I was asked to create a database user and password. I placed those into my password manager and created the user.
 - Choose a connection method. I am using the MongoDB drivers. I will allow xDrip+ to use its existing drivers, but will use Python for testing.
 
-Getting the config into xDrip is a bit tedious. See gemini conversation and clean this up when that works. You'll need the shards info.
+### Connection string limitations in xDrip+
 
-Create the full connection string for xDrip using the shards.
+xDrip+ bundles `mongo-java-driver-3.4.0` (circa 2016). This old driver has two hard
+limitations that prevent it from using standard Atlas connection strings:
 
-Update the network access. During the setup process, your IP address will be used as the only one capable of connecting to the DB. Document how to change that here.
+| String format | What happens in xDrip+ |
+|---|---|
+| `mongodb+srv://…` | Driver rejects it: *"Connection strings must start with 'mongodb://'"* |
+| `mongodb://host1,host2,host3/…` | Java's `URI.getHost()` returns `null` for multi-host authority strings → `NullPointerException` in `NightscoutUploader.java` |
 
-Maybe explain how to change the DB user's password when needed.
+**The fix:** use a *single-shard* `mongodb://` string. Run:
+
+```bash
+python get_connection_string.py
+```
+
+Copy the **"Single-shard (xDrip+ compatible)"** string from the output.
+
+In xDrip+ go to **Settings → Cloud Upload → MongoDB** and enter:
+- **URI**: the single-shard connection string (contains only one host, uses `ssl=true`)
+- **Collection**: `entries`
+- **Device status collection**: `devicestatus`
+
+### Network access
+
+During Atlas cluster setup, only your current IP address is added to the allow-list.
+Since your phone's IP changes constantly, you must allow access from anywhere:
+
+1. In Atlas go to **Security → Network Access**.
+2. Click **Edit** on your existing entry → **Allow Access from Anywhere** → **Confirm**.
+
+This sets the CIDR to `0.0.0.0/0`.
 
 ## Setting Up Your Environment
 
