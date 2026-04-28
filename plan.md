@@ -72,88 +72,23 @@ export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
 ## Phase 3: Application Code & The Test Suite
 
 ### 3.1 The Cloud Function (`main.py`)
-Write the listener using the Functions Framework. 
+The listener uses the Functions Framework. `bq_client` is initialized at module level (outside the handler) so the connection is reused across requests — standard GCP guidance for Cloud Functions.
 
-```python
-import os
-import json
-from google.cloud import bigquery
-from flask import Request, jsonify
+> **Note:** `PROJECT_ID` falls back to `bq_client.project`, which reads the project directly from `gcp-key.json`. No `GCP_PROJECT` env var is required locally.
 
-# Initialize client outside the handler for connection pooling
-bq_client = bigquery.Client()
-PROJECT_ID = os.environ.get('GCP_PROJECT', 'your-project-id')
-DATASET_ID = 'health_metrics'
-TABLE_ID = 'cgm_data'
-TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
+### 3.2 The Test Suite
+The project has two complementary layers of testing:
 
-def process_xdrip_payload(request: Request):
-    """HTTP Cloud Function to ingest xDrip+ data."""
-    try:
-        payload = request.get_json(silent=True)
-        if not payload:
-            return jsonify({"error": "Invalid JSON"}), 400
+| Layer | Files | Hits GCP? | When to run |
+|---|---|---|---|
+| **Unit tests** (`pytest`) | `test_main.py`, `conftest.py` | No — BQ is fully mocked | Before every commit |
+| **Manual integration** (`curl`) | `functions-framework` + shell | Yes — real BigQuery write | When verifying end-to-end wiring |
 
-        # xDrip+ arrays often send multiple readings in a list
-        if isinstance(payload, list):
-            payload = payload[0]
+**Why two files for unit tests?**
 
-        # Extract values (adapt keys based on actual xDrip+ REST format)
-        glucose_value = payload.get('sgv')
-        direction = payload.get('direction')
-        
-        # Identify if this is a test payload sent from our local suite
-        is_test = payload.get('_is_test_record', False)
+`bigquery.Client()` is called at module import time. pytest imports `test_main.py` → which imports `main.py` → which calls `bigquery.Client()` before any mock can intercept it. `conftest.py` is loaded by pytest *before* any test module is imported, so it sets `GOOGLE_APPLICATION_CREDENTIALS` in time for the constructor to succeed. Once the client exists, `test_main.py` mocks out `insert_rows_json` so no real API call is ever made.
 
-        rows_to_insert = [{
-            "timestamp": "AUTO", 
-            "glucose_value": glucose_value,
-            "direction": direction,
-            "raw_data": json.dumps(payload),
-            "is_test": is_test
-        }]
-
-        errors = bq_client.insert_rows_json(TABLE_REF, rows_to_insert)
-        
-        if errors:
-            return jsonify({"error": errors}), 500
-            
-        return jsonify({"status": "success", "is_test": is_test}), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-```
-
-### 3.2 The Test Suite (`test_main.py`)
-Use `pytest` and `unittest.mock` to validate logic without pinging GCP.
-
-```python
-import pytest
-from unittest.mock import patch, MagicMock
-from main import process_xdrip_payload
-from flask import Request
-
-@pytest.fixture
-def mock_request():
-    request = MagicMock(spec=Request)
-    request.get_json.return_value = {
-        "sgv": 120,
-        "direction": "Flat",
-        "_is_test_record": True
-    }
-    return request
-
-@patch('main.bq_client.insert_rows_json')
-def test_successful_payload_parsing(mock_insert, mock_request):
-    mock_insert.return_value = [] # No errors from BigQuery
-    
-    response, status_code = process_xdrip_payload(mock_request)
-    
-    assert status_code == 200
-    assert response.json['status'] == 'success'
-    assert response.json['is_test'] is True
-    mock_insert.assert_called_once()
-```
+A Flask app context fixture is also required because `jsonify()` needs one — under `functions-framework` Flask provides it automatically, but a bare pytest call does not.
 
 ---
 
@@ -227,7 +162,22 @@ The script uses `list_rows()` (the BigQuery Storage read API) rather than a quer
 
 ## Phase 5: Deployment to GCP
 
-Once the test suite passes (`pytest test_main.py`), deploy the function using the `gcloud` CLI. Ensure you assign the Service Account created in Phase 1.
+### 5.1 Pre-deployment Checklist
+Before deploying, confirm both testing layers are green:
+
+**Unit tests** — validates function logic; no credentials or running server needed:
+```bash
+conda activate xdriplooker
+pytest test_main.py -v
+```
+
+**Manual integration test** — confirms live BigQuery connectivity (Phase 4):
+- `functions-framework` server started and returned `{"status": "success"}`
+- `python check_latest.py` shows the row in BigQuery
+
+### 5.2 Deploy to GCP
+
+Before running this command, verify that `gcp-key.json` is listed in `.gcloudignore` (or `.gitignore` — gcloud respects both). The `--source=.` flag uploads the entire current directory; you do not want the service account key bundled into the deployment artifact.
 
 ```bash
 gcloud functions deploy xdrip-listener \
@@ -240,6 +190,26 @@ gcloud functions deploy xdrip-listener \
 --allow-unauthenticated \
 --service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com
 ```
+
+**Line-by-line notes:**
+
+- **`deploy xdrip-listener`** — The public-facing resource name in GCP. Does not need to match anything in the code.
+
+- **`--gen2`** — Generation 2 Cloud Functions run on Cloud Run infrastructure. Better cold-start performance, longer request timeouts (up to 60 min vs. 9 min for Gen 1), and concurrency support. Gen 2 is the current standard.
+
+- **`--runtime=python312`** — GCP Cloud Functions does not yet support Python 3.14, which is what the local `xdriplooker` conda environment uses. `python312` (3.12) is the newest runtime GCP currently offers. The code here uses no 3.13/3.14-specific features, so this is safe. When GCP adds a newer runtime, this is the only flag that needs updating.
+
+- **`--region=us-central1`** — Must match the region of your BigQuery dataset (also `us-central1`, set in Phase 1.2). Mismatched regions can introduce latency and cross-region egress costs.
+
+- **`--source=.`** — Uploads the current directory as the deployment package. See the `.gcloudignore` note above.
+
+- **`--entry-point=process_xdrip_payload`** — The Python function GCP invokes on each HTTP request. Must match the function name in `main.py` exactly.
+
+- **`--trigger-http`** — Makes this an HTTP-triggered function. xDrip+ POSTs directly to a URL, so HTTP is the correct trigger type.
+
+- **`--allow-unauthenticated`** — Allows any device to POST to this URL without a GCP identity token. This is intentional: the xDrip+ app running on your phone has no GCP credentials and no mechanism to sign requests, so authenticated endpoints are not compatible with it. The risk is bounded — the endpoint only writes data, returns nothing sensitive, and the service account can only reach `cgm_data`. The worst-case outcome of someone discovering the URL is junk rows in your CGM table. If that becomes a concern, a lightweight mitigation is to add a shared-secret check in the handler (a hardcoded token xDrip+ can be configured to include as a custom header or body field).
+
+- **`--service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com`** — Binds the function's runtime identity to the dedicated SA from Phase 1 rather than the default Compute Engine service account, which carries broad project-level permissions. This enforces least privilege: the function can only do what BigQuery Data Editor allows, nothing else in the project.
 
 ---
 
