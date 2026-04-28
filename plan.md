@@ -18,7 +18,7 @@ To avoid using personal Google credentials, create a specific Service Account (S
 4. Generate and download a JSON key for this SA. Save it locally as `gcp-key.json` (ensure this is immediately added to your `.gitignore`).
 
 ### 1.2 Provision the BigQuery Dataset & Table
-1. Create a dataset in BigQuery (e.g., `health_metrics`).
+1. Create a dataset in BigQuery (e.g., `health_metrics`). I'm using us-central1 for a region.
 2. Create a table (e.g., `cgm_data`) with the following schema:
    * `timestamp` (TIMESTAMP) - Default to current time if not provided.
    * `glucose_value` (INTEGER)
@@ -41,7 +41,7 @@ source venv/bin/activate
 echo "gcp-key.json" >> .gitignore
 ```
 
-### 2.2 Install Dependencies
+### 2.2 Install Dependencies - This needs work to align with current repo
 Create a `requirements.txt` file containing the necessary production and testing libraries:
 
 ```text
