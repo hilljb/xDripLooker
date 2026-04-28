@@ -44,6 +44,10 @@ echo "gcp-key.json" >> .gitignore
 ### 2.2 Install Dependencies - This needs work to align with current repo
 Create a `requirements.txt` file containing the necessary production and testing libraries:
 
+#### Change to conda - Point out the conda forge usage - testing 3.14
+
+Upload the environment.yaml if everything works. It looks like requests get installed automatically.
+
 ```text
 functions-framework==3.*
 google-cloud-bigquery==3.*
