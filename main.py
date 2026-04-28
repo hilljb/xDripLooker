@@ -1,11 +1,12 @@
 import os
 import json
+from datetime import datetime, timezone
 from google.cloud import bigquery
 from flask import Request, jsonify
 
 # Initialize client outside the handler for connection pooling
 bq_client = bigquery.Client()
-PROJECT_ID = os.environ.get('GCP_PROJECT', 'your-project-id')
+PROJECT_ID = os.environ.get('GCP_PROJECT', bq_client.project)
 DATASET_ID = 'health_metrics'
 TABLE_ID = 'cgm_data'
 TABLE_REF = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
@@ -29,7 +30,7 @@ def process_xdrip_payload(request: Request):
         is_test = payload.get('_is_test_record', False)
 
         rows_to_insert = [{
-            "timestamp": "AUTO", 
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "glucose_value": glucose_value,
             "direction": direction,
             "raw_data": json.dumps(payload),

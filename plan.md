@@ -36,36 +36,36 @@ From your terminal, set up the project structure:
 ```bash
 mkdir xdrip-bq-listener && cd xdrip-bq-listener
 git init
-python3 -m venv venv
-source venv/bin/activate
 echo "gcp-key.json" >> .gitignore
 ```
 
-### 2.2 Install Dependencies - This needs work to align with current repo
-Create a `requirements.txt` file containing the necessary production and testing libraries:
+### 2.2 Conda Environment Setup
+This project uses a conda environment named `xdriplooker` (Python 3.14). The environment definition is exported to `environment.yml` in this repo.
 
-#### Change to conda - Point out the conda forge usage - testing 3.14
-
-Upload the environment.yaml if everything works. It looks like requests get installed automatically.
-
-```text
-functions-framework==3.*
-google-cloud-bigquery==3.*
-pytest==7.*
-requests==2.*
+To recreate the environment on a new machine:
+```bash
+conda env create -f environment.yml
+conda activate xdriplooker
 ```
 
-Install them via `pip`:
+To activate the existing environment:
 ```bash
-pip install -r requirements.txt
+conda activate xdriplooker
+```
+
+To update `environment.yml` after installing new packages:
+```bash
+conda env export -n xdriplooker --no-builds > environment.yml
 ```
 
 ### 2.3 Configure Local Authentication
-Point your local environment to the Service Account key:
+Point your local environment to the Service Account key. **This must be re-exported in every new shell session** — it is not persisted automatically. Run it from the project root so the relative path resolves correctly.
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
 ```
+
+> **Note:** `bigquery.Client()` is called at module import time in `main.py`. If this variable is not set when you start `functions-framework`, the process will fail immediately before serving any requests. See Phase 4.1 for the full startup sequence.
 
 ---
 
@@ -160,10 +160,31 @@ def test_successful_payload_parsing(mock_insert, mock_request):
 ## Phase 4: Local Simulation & Execution
 
 ### 4.1 Run the Local Server
-Start the Functions Framework emulator to spin up a local listener on port 8080:
+
+The BigQuery client initializes at import time and resolves credentials via Google's [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) chain. Locally, that chain only has two realistic options: the `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing at `gcp-key.json`, or a `gcloud auth application-default login` session. **You must export the variable in the same shell session before starting the server**, otherwise the import fails immediately with `DefaultCredentialsError`.
 
 ```bash
+conda activate xdriplooker
+export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
 functions-framework --target=process_xdrip_payload --debug
+```
+
+A successful start looks like:
+```
+* Serving Flask app 'process_xdrip_payload'
+* Debug mode: on
+* Running on http://127.0.0.1:8080
+```
+
+#### Killing an orphaned server process
+If the server was started in a terminal that was closed (or crashed), port 8080 stays occupied. Kill it before trying again:
+
+```bash
+# Find and kill whatever is holding port 8080
+lsof -ti :8080 | xargs kill -9
+
+# Confirm the port is free
+lsof -i :8080
 ```
 
 ### 4.2 Simulate the xDrip+ POST Request
@@ -179,7 +200,28 @@ curl -X POST http://localhost:8080 \
     "_is_test_record": true
 }'
 ```
-*Verify in your BigQuery console that the row was inserted and `is_test` is `TRUE`.*
+A successful response looks like:
+```json
+{
+  "is_test": true,
+  "status": "success"
+}
+```
+
+To verify the row landed in BigQuery, run the included helper script from the project root (make sure the conda environment is active and `GOOGLE_APPLICATION_CREDENTIALS` is exported):
+
+```bash
+python check_latest.py
+```
+
+Expected output:
+```
+timestamp                           glucose_value   direction            is_test
+--------------------------------------------------------------------------------
+2026-04-28 17:04:39.115556+00:00    105             FortyFiveUp          True
+```
+
+The script uses `list_rows()` (the BigQuery Storage read API) rather than a query job, so it works with the **BigQuery Data Editor** role already on the service account — no additional IAM permissions needed.
 
 ---
 
@@ -190,13 +232,13 @@ Once the test suite passes (`pytest test_main.py`), deploy the function using th
 ```bash
 gcloud functions deploy xdrip-listener \
 --gen2 \
---runtime=python311 \
+--runtime=python312 \
 --region=us-central1 \
 --source=. \
 --entry-point=process_xdrip_payload \
 --trigger-http \
 --allow-unauthenticated \
---service-account=xdrip-listener-sa@your-project-id.iam.gserviceaccount.com
+--service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com
 ```
 
 ---
@@ -219,7 +261,7 @@ SELECT
   timestamp, 
   glucose_value, 
   direction 
-FROM `your-project-id.health_metrics.cgm_data`
+FROM `xdriplooker.health_metrics.cgm_data`
 WHERE is_test = FALSE
 ORDER BY timestamp DESC
 ```
