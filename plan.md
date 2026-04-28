@@ -162,7 +162,30 @@ The script uses `list_rows()` (the BigQuery Storage read API) rather than a quer
 
 ## Phase 5: Deployment to GCP
 
-### 5.1 Pre-deployment Checklist
+### 5.1 Install the Google Cloud SDK (`gcloud`)
+
+`gcloud` is a standalone system-level CLI tool — it is **not** a Python package and is not part of the `xdriplooker` conda environment. It must be installed separately before any deployment steps.
+
+The recommended approach on macOS is via Homebrew:
+
+```bash
+brew install --cask google-cloud-sdk
+```
+
+Verify the installation:
+
+```bash
+gcloud --version
+```
+
+You should see output like:
+```
+Google Cloud SDK 549.0.1
+```
+
+If you don't have Homebrew, or prefer a manual install, download the SDK directly from [https://cloud.google.com/sdk/docs/install](https://cloud.google.com/sdk/docs/install) and follow the instructions for your OS.
+
+### 5.2 Pre-deployment Checklist
 Before deploying, confirm both testing layers are green:
 
 **Unit tests** — validates function logic; no credentials or running server needed:
@@ -175,7 +198,98 @@ pytest test_main.py -v
 - `functions-framework` server started and returned `{"status": "success"}`
 - `python check_latest.py` shows the row in BigQuery
 
-### 5.2 Deploy to GCP
+### 5.3 Authenticate `gcloud` and Verify Deployment Permissions
+
+> **Two separate credential systems are in use in this project — do not confuse them:**
+>
+> - `GOOGLE_APPLICATION_CREDENTIALS` / `gcp-key.json` — used by the Python code (locally and at runtime in GCP) to authenticate the BigQuery client. This belongs to the dedicated service account with only BigQuery Data Editor permissions.
+> - `gcloud` CLI credentials — used by *you* to deploy infrastructure. These are your personal Google account credentials and must have IAM permissions to create Cloud Functions, Cloud Run services, and bind service accounts. If `GOOGLE_APPLICATION_CREDENTIALS` is set in your shell when you run `gcloud`, it does **not** affect `gcloud` — the two systems are completely independent.
+>
+> Running `gcloud functions deploy` as the service account identity would fail; that SA has no Cloud Functions or Cloud Run permissions.
+
+#### Step 1: Authenticate
+
+Confirm `gcloud` is authenticated with your personal Google account:
+
+```bash
+gcloud auth list
+```
+
+If your account is not listed as active, or if you see an `invalid_grant: Bad Request` error (which means your token has expired — this happens periodically even on previously authenticated machines), log in again:
+
+```bash
+gcloud auth login
+```
+
+This opens a browser window for Google OAuth. Once complete, confirm the active account:
+
+```bash
+gcloud config get-value account
+```
+
+#### Step 2: Set the Active Project
+
+`gcloud` deploys to whatever project is currently active — which may not be `xdriplooker` if you use `gcloud` for other GCP projects. Set it explicitly:
+
+```bash
+gcloud config set project xdriplooker
+```
+
+#### Step 3: Verify Deployment Permissions
+
+Deploying a Gen 2 Cloud Function requires your personal account to hold at least these roles on the project:
+
+| Role | Why it's needed |
+|---|---|
+| `roles/cloudfunctions.developer` | Create and update Cloud Functions |
+| `roles/run.admin` | Gen 2 functions deploy to Cloud Run under the hood |
+| `roles/iam.serviceAccountUser` | Bind the runtime SA to the function |
+| `roles/storage.admin` or `roles/artifactregistry.writer` | Upload the source package |
+
+If you are the project owner (`roles/owner`), all of the above are already included and you can skip ahead.
+
+Check your roles on the project:
+
+```bash
+gcloud projects get-iam-policy xdriplooker \
+  --flatten="bindings[].members" \
+  --format="table(bindings.role)" \
+  --filter="bindings.members:YOUR_EMAIL@gmail.com"
+```
+
+Replace `YOUR_EMAIL@gmail.com` with your Google account. If `roles/owner` appears in the output, you have full permissions. Example output:
+
+```
+ROLE
+roles/owner
+```
+
+#### If permissions are missing
+
+If your account is not the project owner and the required roles are absent, someone with Owner or IAM Admin access on the project must grant them. The minimum set can be granted via the GCP Console (**IAM & Admin > IAM > Grant Access**) or via `gcloud`:
+
+```bash
+# Run as project owner / IAM admin, substituting the account that needs access
+gcloud projects add-iam-policy-binding xdriplooker \
+  --member="user:DEPLOYER_EMAIL@gmail.com" \
+  --role="roles/cloudfunctions.developer"
+
+gcloud projects add-iam-policy-binding xdriplooker \
+  --member="user:DEPLOYER_EMAIL@gmail.com" \
+  --role="roles/run.admin"
+
+gcloud projects add-iam-policy-binding xdriplooker \
+  --member="user:DEPLOYER_EMAIL@gmail.com" \
+  --role="roles/iam.serviceAccountUser"
+
+gcloud projects add-iam-policy-binding xdriplooker \
+  --member="user:DEPLOYER_EMAIL@gmail.com" \
+  --role="roles/artifactregistry.writer"
+```
+
+Once all three steps above are confirmed, proceed to 5.4.
+
+### 5.4 Deploy to GCP
 
 Before running this command, verify that `gcp-key.json` is listed in `.gcloudignore` (or `.gitignore` — gcloud respects both). The `--source=.` flag uploads the entire current directory; you do not want the service account key bundled into the deployment artifact.
 
@@ -209,7 +323,7 @@ gcloud functions deploy xdrip-listener \
 
 - **`--allow-unauthenticated`** — Allows any device to POST to this URL without a GCP identity token. This is intentional: the xDrip+ app running on your phone has no GCP credentials and no mechanism to sign requests, so authenticated endpoints are not compatible with it. The risk is bounded — the endpoint only writes data, returns nothing sensitive, and the service account can only reach `cgm_data`. The worst-case outcome of someone discovering the URL is junk rows in your CGM table. If that becomes a concern, a lightweight mitigation is to add a shared-secret check in the handler (a hardcoded token xDrip+ can be configured to include as a custom header or body field).
 
-- **`--service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com`** — Binds the function's runtime identity to the dedicated SA from Phase 1 rather than the default Compute Engine service account, which carries broad project-level permissions. This enforces least privilege: the function can only do what BigQuery Data Editor allows, nothing else in the project.
+- **`--service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com`** — Binds the function's *runtime* identity to the dedicated SA from Phase 1, not the deploying identity. This enforces least privilege: once deployed, the function can only do what BigQuery Data Editor allows, nothing else in the project.
 
 ---
 
