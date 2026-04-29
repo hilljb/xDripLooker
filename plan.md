@@ -3,7 +3,7 @@
 ## Architecture Overview
 * **Listener:** Python Cloud Function (Generation 2, HTTP Trigger), exposing a Nightscout-compatible REST endpoint (`/api/v1/entries`) so xDrip+ requires no customization.
 * **Storage:** BigQuery table schema aligned to the full xDrip+ entry payload.
-* **Security:** Dedicated GCP Service Account (Least Privilege) + `api-secret` header authentication matching the Nightscout convention (SHA1 hash of a shared password).
+* **Security:** Dedicated GCP Service Account (Least Privilege) + `Authorization: Basic` header authentication. xDrip+ sends the plaintext password via HTTP Basic Auth; the function hashes it with SHA256 and compares against a stored hash deployed as an environment variable. No client-side pre-hashing required.
 * **Local Dev:** Google Functions Framework for local execution, `pytest` for the test suite.
 
 ---
@@ -105,6 +105,45 @@ The listener uses the Functions Framework. `bq_client` is initialized at module 
 
 > **Note:** `PROJECT_ID` falls back to `bq_client.project`, which reads the project directly from `gcp-key.json`. No `GCP_PROJECT` env var is required locally.
 
+**Required changes:**
+
+1. **Path routing** — xDrip+ POSTs to `/api/v1/entries`, not `/`. Flask routing must be added to handle this path. Any other path should return 404.
+
+2. **Authentication** — xDrip+ sends the plaintext password via `Authorization: Basic` header (the standard result of the `password@hostname` URL format). The function must:
+   - Decode the Base64 `Authorization` header to extract the plaintext password
+   - Hash it with SHA256: `hashlib.sha256(password.encode()).hexdigest()`
+   - Compare against `API_SECRET_HASH`, an environment variable set at deploy time
+   - Return 401 if the header is missing or the hashes do not match
+
+   **Why this approach over the Nightscout SHA1 convention:** The connection is already HTTPS, so the plaintext password is encrypted in transit — there is no benefit to pre-hashing on the client. Hashing on the server with SHA256 (stronger than SHA1) means the plaintext secret never persists anywhere; only the hash is stored. This removes any dependency on GCP Secret Manager and is straightforwardly secure for a personal project.
+
+   To pre-compute the hash to store at deploy time:
+   ```bash
+   python3 -c "import hashlib; print(hashlib.sha256(b'your_password_here').hexdigest())"
+   ```
+
+3. **Payload parsing** — xDrip+ sends a JSON **array** of entry objects. Each entry has a different shape depending on `type` (`sgv`, `mbg`, or `cal`). The function must iterate the array, extract the correct fields per entry, and derive `timestamp` from the `date` field (milliseconds since epoch ÷ 1000) rather than using server arrival time.
+
+   **xDrip+ SGV entry shape** (the most common type — sensor glucose value):
+   ```json
+   [
+     {
+       "type": "sgv",
+       "date": 1650000000000,
+       "dateString": "2022-04-15T06:40:00.000Z",
+       "sgv": 105,
+       "direction": "FortyFiveUp",
+       "noise": 1,
+       "filtered": 192256,
+       "unfiltered": 194944,
+       "rssi": 100,
+       "device": "xDrip LibreReceiver"
+     }
+   ]
+   ```
+
+4. **`is_test` handling** — Real xDrip+ traffic does not include `_is_test_record`. All live requests set `is_test = False`. Integration tests should use a distinct `device` value (e.g., `"xDrip-test"`) to identify test rows, but `is_test` itself will be `False` for all traffic through the Nightscout endpoint. The flag remains useful for any rows inserted via a separate test-only path if one is added later.
+
 ### 3.2 The Test Suite
 
 > **🔨 WORK NEEDED** — Unit tests in `test_main.py` must be updated to cover the new path routing, authentication header checking, and xDrip+ payload format. The two-layer testing structure (unit tests + manual `curl` integration) remains correct; only the test cases need rewriting.
@@ -158,18 +197,12 @@ lsof -i :8080
 
 > **🔨 WORK NEEDED** — The curl command below reflects the real xDrip+ payload format and Nightscout-compatible path. This test will not pass until the `main.py` changes from Phase 3.1 are implemented (path routing and auth).
 
-Once Phase 3.1 is complete, the correct integration test mimics what xDrip+ actually sends. First, compute the SHA1 hash of your chosen password (this is what xDrip+ sends as the `api-secret` header — it hashes the password before sending):
-
-```bash
-echo -n "your_password_here" | shasum -a 1 | awk '{print $1}'
-```
-
-Then POST to the Nightscout-compatible path:
+Once Phase 3.1 is complete, the correct integration test mimics what xDrip+ actually sends. xDrip+ uses HTTP Basic Auth — `curl`'s `-u` flag handles the Base64 encoding automatically, exactly as xDrip+ does:
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/entries \
+  -u "your_password_here:" \
   -H "Content-Type: application/json" \
-  -H "api-secret: <SHA1_HASH_FROM_ABOVE>" \
   -d '[{
     "type": "sgv",
     "date": 1650000000000,
@@ -353,13 +386,13 @@ google-cloud-bigquery==3.41.0
 
 Flask does not need to be listed explicitly — `functions-framework` declares it as a dependency and GCP will install it transitively.
 
-**The `API_SECRET_HASH` environment variable must be set on the function.** The deployed function needs the expected SHA1 hash of your chosen password to authenticate incoming xDrip+ requests. Compute it locally first:
+**The `API_SECRET_HASH` environment variable must be set on the function.** The function receives the plaintext password from xDrip+ via HTTP Basic Auth, SHA256-hashes it, and compares against this stored value. Compute it locally before deploying:
 
 ```bash
-echo -n "your_password_here" | shasum -a 1 | awk '{print $1}'
+python3 -c "import hashlib; print(hashlib.sha256(b'your_password_here').hexdigest())"
 ```
 
-> **🔨 SPIKE NEEDED — Secret Manager.** The recommended production approach is to store this hash in GCP Secret Manager and reference it in the deploy command via `--set-secrets`. Until that is implemented, pass it as a plain environment variable using `--set-env-vars API_SECRET_HASH=<hash>` appended to the deploy command in Phase 5.4. The plain env var approach works but makes the hash visible in the Cloud Console UI under the function's configuration tab.
+Pass it to the deploy command by appending `--set-env-vars API_SECRET_HASH=<hash>`. The hash is visible in the Cloud Console UI under the function's configuration tab, which is acceptable — the hash cannot be reversed to the original password and the endpoint is write-only.
 
 **GCP APIs must be enabled on the project.** On a new GCP project, the Cloud Functions, Cloud Run, Cloud Build, and Artifact Registry APIs are disabled by default. Enable them all at once (only needs to be done once per project):
 
