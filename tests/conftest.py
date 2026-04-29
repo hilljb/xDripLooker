@@ -12,6 +12,6 @@ in each test that exercises the handler.
 import os
 from pathlib import Path
 
-creds_path = Path(__file__).parent / "gcp-key.json"
+creds_path = Path(__file__).parent.parent / "gcp-key.json"
 if creds_path.exists():
     os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", str(creds_path))
