@@ -291,23 +291,59 @@ Once all three steps above are confirmed, proceed to 5.4.
 
 ### 5.4 Deploy to GCP
 
-Before running this command, verify that `gcp-key.json` is listed in `.gcloudignore` (or `.gitignore` — gcloud respects both). The `--source=.` flag uploads the entire current directory; you do not want the service account key bundled into the deployment artifact.
+#### Prerequisites
+
+**`requirements.txt` must exist in the project root.** GCP Cloud Functions installs Python dependencies from this file at build time. The conda `environment.yml` is only for local development — GCP does not use it. The file should contain only the production runtime dependencies (not pytest or other dev tools):
+
+```text
+functions-framework==3.8.3
+google-cloud-bigquery==3.41.0
+```
+
+Flask does not need to be listed explicitly — `functions-framework` declares it as a dependency and GCP will install it transitively.
+
+**GCP APIs must be enabled on the project.** On a new GCP project, the Cloud Functions, Cloud Run, Cloud Build, and Artifact Registry APIs are disabled by default. Enable them all at once (only needs to be done once per project):
+
+```bash
+gcloud services enable \
+  cloudfunctions.googleapis.com \
+  run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  --project=xdriplooker
+```
+
+**Verify `gcp-key.json` is excluded from the upload.** The `--source=.` flag packages the current directory. The `*.json` rule in `.gitignore` covers this — `gcloud` auto-generates a `.gcloudignore` from `.gitignore` on first deploy if one doesn't exist.
+
+#### Deploy command
+
+The `--project` flag is included explicitly so the command always targets `xdriplooker` regardless of what `gcloud config` is set to locally. This prevents accidentally deploying to a different active project:
 
 ```bash
 gcloud functions deploy xdrip-listener \
---gen2 \
---runtime=python312 \
---region=us-central1 \
---source=. \
---entry-point=process_xdrip_payload \
---trigger-http \
---allow-unauthenticated \
---service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com
+  --project=xdriplooker \
+  --gen2 \
+  --runtime=python312 \
+  --region=us-central1 \
+  --source=. \
+  --entry-point=process_xdrip_payload \
+  --trigger-http \
+  --allow-unauthenticated \
+  --service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com
+```
+
+A successful deploy takes roughly 2 minutes and ends with output like:
+
+```
+state: ACTIVE
+url: https://us-central1-xdriplooker.cloudfunctions.net/xdrip-listener
 ```
 
 **Line-by-line notes:**
 
 - **`deploy xdrip-listener`** — The public-facing resource name in GCP. Does not need to match anything in the code.
+
+- **`--project=xdriplooker`** — Explicitly targets this project. Without this flag, `gcloud` uses whatever project `gcloud config get-value project` returns, which may be something else entirely.
 
 - **`--gen2`** — Generation 2 Cloud Functions run on Cloud Run infrastructure. Better cold-start performance, longer request timeouts (up to 60 min vs. 9 min for Gen 1), and concurrency support. Gen 2 is the current standard.
 
@@ -315,7 +351,7 @@ gcloud functions deploy xdrip-listener \
 
 - **`--region=us-central1`** — Must match the region of your BigQuery dataset (also `us-central1`, set in Phase 1.2). Mismatched regions can introduce latency and cross-region egress costs.
 
-- **`--source=.`** — Uploads the current directory as the deployment package. See the `.gcloudignore` note above.
+- **`--source=.`** — Uploads the current directory as the deployment package.
 
 - **`--entry-point=process_xdrip_payload`** — The Python function GCP invokes on each HTTP request. Must match the function name in `main.py` exactly.
 
@@ -325,13 +361,65 @@ gcloud functions deploy xdrip-listener \
 
 - **`--service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com`** — Binds the function's *runtime* identity to the dedicated SA from Phase 1, not the deploying identity. This enforces least privilege: once deployed, the function can only do what BigQuery Data Editor allows, nothing else in the project.
 
+#### Smoke test
+
+Once deployed, verify the live endpoint responds correctly:
+
+```bash
+curl -s -X POST https://us-central1-xdriplooker.cloudfunctions.net/xdrip-listener \
+  -H "Content-Type: application/json" \
+  -d '{"sgv": 110, "direction": "Flat", "date": 1650000000000, "_is_test_record": true}'
+```
+
+Expected response:
+```json
+{"is_test": true, "status": "success"}
+```
+
+### 5.5 Updating and Recovering the Deployed Function
+
+#### Updating the function (normal workflow)
+
+Re-running the same `gcloud functions deploy` command with the same function name updates it in place. GCP builds the new version, waits for it to be healthy, then shifts traffic to it — the old revision stays alive and continues serving requests until the new one is confirmed. **There is no downtime.** The trigger URL never changes on an update.
+
+#### If a deployment fails mid-way
+
+If the new deployment fails (bad code, missing dependency, etc.), GCP does **not** automatically roll back, but the previous healthy revision continues serving traffic since Gen 2 keeps it alive until the new one is confirmed. A failed deploy leaves the function in a working state. Verify which revision is active:
+
+```bash
+gcloud run revisions list --service=xdrip-listener --region=us-central1 --project=xdriplooker
+```
+
+Fix the issue in your code, then re-run the deploy command.
+
+#### Deleting and redeploying from scratch
+
+Only do this if the function is in a corrupted state that a normal re-deploy cannot recover from (rare). **Important:** deleting the function permanently destroys the trigger URL. If xDrip+ is already configured to point at it, you will need to reconfigure the app on your phone with the new URL after redeployment.
+
+```bash
+# Delete the function
+gcloud functions delete xdrip-listener --region=us-central1 --gen2 --project=xdriplooker
+
+# Redeploy using the same command as 5.4
+gcloud functions deploy xdrip-listener \
+  --project=xdriplooker \
+  --gen2 \
+  --runtime=python312 \
+  --region=us-central1 \
+  --source=. \
+  --entry-point=process_xdrip_payload \
+  --trigger-http \
+  --allow-unauthenticated \
+  --service-account=xdriplooker@xdriplooker.iam.gserviceaccount.com
+```
+
 ---
 
 ## Phase 6: xDrip+ Configuration & Analytics Filtering
 
 ### 6.1 Configure xDrip+ on your Phone
 1. Open xDrip+ and navigate to **Settings > Cloud Upload > REST API**.
-2. Enter the trigger URL provided by GCP after deployment (e.g., `https://us-central1-your-project.cloudfunctions.net/xdrip-listener`).
+2. Enter the trigger URL: `https://us-central1-xdriplooker.cloudfunctions.net/xdrip-listener`
 3. Enable the upload.
 
 ### 6.2 Looker Studio Configuration
