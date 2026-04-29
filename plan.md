@@ -1,9 +1,9 @@
 # xDrip+ to BigQuery: Ingestion Pipeline Development Plan
 
 ## Architecture Overview
-* **Listener:** Python Cloud Function (Generation 2, HTTP Trigger).
-* **Storage:** BigQuery table with a specific schema to accommodate xDrip+ payloads and environment tagging.
-* **Security:** Dedicated GCP Service Account (Least Privilege).
+* **Listener:** Python Cloud Function (Generation 2, HTTP Trigger), exposing a Nightscout-compatible REST endpoint (`/api/v1/entries`) so xDrip+ requires no customization.
+* **Storage:** BigQuery table schema aligned to the full xDrip+ entry payload.
+* **Security:** Dedicated GCP Service Account (Least Privilege) + `api-secret` header authentication matching the Nightscout convention (SHA1 hash of a shared password).
 * **Local Dev:** Google Functions Framework for local execution, `pytest` for the test suite.
 
 ---
@@ -18,13 +18,39 @@ To avoid using personal Google credentials, create a specific Service Account (S
 4. Generate and download a JSON key for this SA. Save it locally as `gcp-key.json` (ensure this is immediately added to your `.gitignore`).
 
 ### 1.2 Provision the BigQuery Dataset & Table
-1. Create a dataset in BigQuery (e.g., `health_metrics`). I'm using us-central1 for a region.
-2. Create a table (e.g., `cgm_data`) with the following schema:
-   * `timestamp` (TIMESTAMP) - Default to current time if not provided.
-   * `glucose_value` (INTEGER)
-   * `direction` (STRING)
-   * `raw_data` (JSON) - Useful for storing the entire unmodified payload.
-   * `is_test` (BOOLEAN) - **Crucial for filtering out your test suite data in Looker Studio.**
+
+> **🔨 WORK NEEDED — Schema migration required.** The table was initially created with a minimal schema. The xDrip+ payload (researched below) carries significantly more fields worth retaining. The existing `cgm_data` table will need to be altered or recreated. Altering a BigQuery table to add columns is non-destructive; existing rows receive `NULL` for new columns.
+
+1. Create a dataset in BigQuery (e.g., `health_metrics`). Region: `us-central1`.
+2. Create a table (e.g., `cgm_data`) with the following schema, aligned to the full xDrip+ Nightscout entry payload:
+
+| Column | Type | Notes |
+|---|---|---|
+| `timestamp` | TIMESTAMP | Derived from xDrip+ `date` field (ms epoch ÷ 1000). Reflects the actual reading time, not server arrival time. |
+| `glucose_value` | INTEGER | From `sgv` field. mg/dL. |
+| `direction` | STRING | Trend arrow from CGM. Values: `DoubleUp`, `SingleUp`, `FortyFiveUp`, `Flat`, `FortyFiveDown`, `SingleDown`, `DoubleDown`, `NOT COMPUTABLE`, `RATE OUT OF RANGE`. |
+| `entry_type` | STRING | From `type` field. Values: `sgv` (sensor glucose), `mbg` (meter blood glucose), `cal` (calibration). |
+| `device` | STRING | From `device` field. Identifies the xDrip+ device/sensor source. |
+| `noise` | INTEGER | Signal noise level at time of reading. xDrip+ scale: 0=none, 1=low, 2=high, 3=high_for_predict, 4=very_high, 5=extreme. |
+| `filtered` | FLOAT | Raw filtered value directly from CGM transmitter. |
+| `unfiltered` | FLOAT | Raw unfiltered value directly from CGM transmitter. |
+| `rssi` | INTEGER | Signal strength from CGM transmitter. |
+| `date_string` | STRING | ISO 8601 timestamp string from xDrip+ (`dateString` field). Kept alongside `timestamp` for debugging. |
+| `raw_data` | JSON | Entire unmodified entry object. Useful for fields added by future xDrip+ versions. |
+| `is_test` | BOOLEAN | **Crucial for filtering test data in Looker Studio.** Real xDrip+ traffic always sets this `FALSE`. Integration tests use a separate mechanism — see Phase 3.2. |
+
+To add missing columns to an existing table without losing data, use `ALTER TABLE` in the BigQuery console or CLI:
+
+```sql
+ALTER TABLE `xdriplooker.health_metrics.cgm_data`
+  ADD COLUMN IF NOT EXISTS entry_type STRING,
+  ADD COLUMN IF NOT EXISTS device STRING,
+  ADD COLUMN IF NOT EXISTS noise INT64,
+  ADD COLUMN IF NOT EXISTS filtered FLOAT64,
+  ADD COLUMN IF NOT EXISTS unfiltered FLOAT64,
+  ADD COLUMN IF NOT EXISTS rssi INT64,
+  ADD COLUMN IF NOT EXISTS date_string STRING;
+```
 
 ---
 
@@ -72,11 +98,17 @@ export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
 ## Phase 3: Application Code & The Test Suite
 
 ### 3.1 The Cloud Function (`main.py`)
+
+> **🔨 WORK NEEDED** — `main.py` requires significant changes to align with the xDrip+ request format. The current implementation handles a simple POST to `/`, uses a placeholder payload shape, and has no authentication. All three need to change.
+
 The listener uses the Functions Framework. `bq_client` is initialized at module level (outside the handler) so the connection is reused across requests — standard GCP guidance for Cloud Functions.
 
 > **Note:** `PROJECT_ID` falls back to `bq_client.project`, which reads the project directly from `gcp-key.json`. No `GCP_PROJECT` env var is required locally.
 
 ### 3.2 The Test Suite
+
+> **🔨 WORK NEEDED** — Unit tests in `test_main.py` must be updated to cover the new path routing, authentication header checking, and xDrip+ payload format. The two-layer testing structure (unit tests + manual `curl` integration) remains correct; only the test cases need rewriting.
+
 The project has two complementary layers of testing:
 
 | Layer | Files | Hits GCP? | When to run |
@@ -123,22 +155,39 @@ lsof -i :8080
 ```
 
 ### 4.2 Simulate the xDrip+ POST Request
-From another terminal window, fire a synthetic payload at your local server:
+
+> **🔨 WORK NEEDED** — The curl command below reflects the real xDrip+ payload format and Nightscout-compatible path. This test will not pass until the `main.py` changes from Phase 3.1 are implemented (path routing and auth).
+
+Once Phase 3.1 is complete, the correct integration test mimics what xDrip+ actually sends. First, compute the SHA1 hash of your chosen password (this is what xDrip+ sends as the `api-secret` header — it hashes the password before sending):
 
 ```bash
-curl -X POST http://localhost:8080 \
--H "Content-Type: application/json" \
--d '{
+echo -n "your_password_here" | shasum -a 1 | awk '{print $1}'
+```
+
+Then POST to the Nightscout-compatible path:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/entries \
+  -H "Content-Type: application/json" \
+  -H "api-secret: <SHA1_HASH_FROM_ABOVE>" \
+  -d '[{
+    "type": "sgv",
+    "date": 1650000000000,
+    "dateString": "2022-04-15T06:40:00.000Z",
     "sgv": 105,
     "direction": "FortyFiveUp",
-    "date": 1650000000000,
-    "_is_test_record": true
-}'
+    "noise": 1,
+    "filtered": 192256,
+    "unfiltered": 194944,
+    "rssi": 100,
+    "device": "xDrip-test"
+  }]'
 ```
+
 A successful response looks like:
 ```json
 {
-  "is_test": true,
+  "inserted": 1,
   "status": "success"
 }
 ```
@@ -153,8 +202,10 @@ Expected output:
 ```
 timestamp                           glucose_value   direction            is_test
 --------------------------------------------------------------------------------
-2026-04-28 17:04:39.115556+00:00    105             FortyFiveUp          True
+2022-04-15 06:40:00+00:00           105             FortyFiveUp          False
 ```
+
+Note that `timestamp` is now derived from the xDrip+ `date` field, not server arrival time, and `is_test` is `False` for real-shaped payloads.
 
 The script uses `list_rows()` (the BigQuery Storage read API) rather than a query job, so it works with the **BigQuery Data Editor** role already on the service account — no additional IAM permissions needed.
 
@@ -301,6 +352,14 @@ google-cloud-bigquery==3.41.0
 ```
 
 Flask does not need to be listed explicitly — `functions-framework` declares it as a dependency and GCP will install it transitively.
+
+**The `API_SECRET_HASH` environment variable must be set on the function.** The deployed function needs the expected SHA1 hash of your chosen password to authenticate incoming xDrip+ requests. Compute it locally first:
+
+```bash
+echo -n "your_password_here" | shasum -a 1 | awk '{print $1}'
+```
+
+> **🔨 SPIKE NEEDED — Secret Manager.** The recommended production approach is to store this hash in GCP Secret Manager and reference it in the deploy command via `--set-secrets`. Until that is implemented, pass it as a plain environment variable using `--set-env-vars API_SECRET_HASH=<hash>` appended to the deploy command in Phase 5.4. The plain env var approach works but makes the hash visible in the Cloud Console UI under the function's configuration tab.
 
 **GCP APIs must be enabled on the project.** On a new GCP project, the Cloud Functions, Cloud Run, Cloud Build, and Artifact Registry APIs are disabled by default. Enable them all at once (only needs to be done once per project):
 
