@@ -7,8 +7,8 @@ The goal is to have a locally testable and GCP deployable function and BigQuery 
 * A GCP project. Mine is named `xDripLooker` where you have admin access. This part is free.
 * Access to the GCP console in your browser.
 * A region where you will set things up. I am using `us-central1`.
-* The `gcloud` console tool. This is installable via `brew` on a Mac.
-* `Conda` for Python. I am using [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) with the conda forge repos.
+* The `gcloud` console tool. This is installable via `brew` on a Mac. You will have to authenticate it with your Google account before much of what follows will work. (You need to re-auth if it hasn't been used in a while.)
+* `Conda` for Python. I am using [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) with the [conda forge](https://conda-forge.org/) repos.
 
 ## Architecture Overview
 * **Listener:** Python Cloud Function (Generation 2, HTTP Trigger), exposing a Nightscout-compatible REST endpoint (`/api/v1/entries`) so xDrip+ requires no customization.
@@ -29,10 +29,34 @@ To avoid using personal Google credentials, create a specific Service Account (S
 
 ### 1.2 Provision the BigQuery Dataset & Table
 
-> **🔨 WORK NEEDED — Schema migration required.** The table was initially created with a minimal schema. The xDrip+ payload (researched below) carries significantly more fields worth retaining. The existing `cgm_data` table will need to be altered or recreated. Altering a BigQuery table to add columns is non-destructive; existing rows receive `NULL` for new columns.
+The dataset and table are created by a single script. From the project root (with `gcloud` authenticated and the `xdriplooker` project accessible):
 
-1. Create a dataset in BigQuery (e.g., `health_metrics`). Region: `us-central1`.
-2. Create a table (e.g., `cgm_data`) with the following schema, aligned to the full xDrip+ Nightscout entry payload:
+```bash
+bash scripts/create_bq_resources.sh
+```
+
+The script is **idempotent** — re-running it on a project where the dataset and table already exist is a safe no-op. On a fresh project it creates both. Expected output on first run:
+
+```
+==> Project : xdriplooker
+==> Dataset : health_metrics  (region: us-central1)
+==> Table   : cgm_data
+
+[create] Creating dataset 'health_metrics' in us-central1...
+[ok] Dataset created.
+[create] Creating table 'cgm_data'...
+[ok] Table created.
+
+Done. Verify in the BigQuery console:
+  https://console.cloud.google.com/bigquery?project=xdriplooker
+```
+
+The table is created with the following configuration:
+
+- **Partitioning:** `DAY` on `timestamp` — queries filtered by date range only scan the relevant day-partitions rather than the full table.
+- **Clustering:** `timestamp` — within each partition, rows are physically ordered by time, enabling block-level skipping for range queries.
+
+**Schema** (aligned to the full xDrip+ Nightscout entry payload):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -48,19 +72,6 @@ To avoid using personal Google credentials, create a specific Service Account (S
 | `date_string` | STRING | ISO 8601 timestamp string from xDrip+ (`dateString` field). Kept alongside `timestamp` for debugging. |
 | `raw_data` | JSON | Entire unmodified entry object. Useful for fields added by future xDrip+ versions. |
 | `is_test` | BOOLEAN | **Crucial for filtering test data in Looker Studio.** Real xDrip+ traffic always sets this `FALSE`. Integration tests use a separate mechanism — see Phase 3.2. |
-
-To add missing columns to an existing table without losing data, use `ALTER TABLE` in the BigQuery console or CLI:
-
-```sql
-ALTER TABLE `xdriplooker.health_metrics.cgm_data`
-  ADD COLUMN IF NOT EXISTS entry_type STRING,
-  ADD COLUMN IF NOT EXISTS device STRING,
-  ADD COLUMN IF NOT EXISTS noise INT64,
-  ADD COLUMN IF NOT EXISTS filtered FLOAT64,
-  ADD COLUMN IF NOT EXISTS unfiltered FLOAT64,
-  ADD COLUMN IF NOT EXISTS rssi INT64,
-  ADD COLUMN IF NOT EXISTS date_string STRING;
-```
 
 ---
 
