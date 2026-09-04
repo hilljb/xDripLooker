@@ -1,5 +1,15 @@
 # xDrip+ to BigQuery: Ingestion Pipeline Development Plan
 
+The goal is to have a locally testable and GCP deployable function and BigQuery environment that we can connect Looker Studio to for custom dashboards using xDrip+ data. This file walks through the data flow setup from a phone running xDrip+ to a BigQuery table storing the data. We could automate everything, but for now some steps will require you to use the GCP console.
+
+## Requirements
+
+* A GCP project. Mine is named `xDripLooker` where you have admin access. This part is free.
+* Access to the GCP console in your browser.
+* A region where you will set things up. I am using `us-central1`.
+* The `gcloud` console tool. This is installable via `brew` on a Mac. You will have to authenticate it with your Google account before much of what follows will work. (You need to re-auth if it hasn't been used in a while.)
+* `Conda` for Python. I am using [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) with the [conda forge](https://conda-forge.org/) repos.
+
 ## Architecture Overview
 * **Listener:** Python Cloud Function (Generation 2, HTTP Trigger), exposing a Nightscout-compatible REST endpoint (`/api/v1/entries`) so xDrip+ requires no customization.
 * **Storage:** BigQuery table schema aligned to the full xDrip+ entry payload.
@@ -13,16 +23,40 @@
 ### 1.1 Create a Dedicated Service Account
 To avoid using personal Google credentials, create a specific Service Account (SA) that only has permission to write to BigQuery.
 1. Navigate to **IAM & Admin > Service Accounts** in the GCP Console.
-2. Create a new SA (e.g., `xdrip-listener-sa@your-project-id.iam.gserviceaccount.com`).
+2. Create a new SA (e.g., `xdrip-listener-sa@xdriplooker.iam.gserviceaccount.com`). `xdriplooker` is the project name.
 3. Grant this SA the **BigQuery Data Editor** role.
 4. Generate and download a JSON key for this SA. Save it locally as `gcp-key.json` (ensure this is immediately added to your `.gitignore`).
 
 ### 1.2 Provision the BigQuery Dataset & Table
 
-> **🔨 WORK NEEDED — Schema migration required.** The table was initially created with a minimal schema. The xDrip+ payload (researched below) carries significantly more fields worth retaining. The existing `cgm_data` table will need to be altered or recreated. Altering a BigQuery table to add columns is non-destructive; existing rows receive `NULL` for new columns.
+The dataset and table are created by a single script. From the project root (with `gcloud` authenticated and the `xdriplooker` project accessible):
 
-1. Create a dataset in BigQuery (e.g., `health_metrics`). Region: `us-central1`.
-2. Create a table (e.g., `cgm_data`) with the following schema, aligned to the full xDrip+ Nightscout entry payload:
+```bash
+bash scripts/create_bq_resources.sh
+```
+
+The script is **idempotent** — re-running it on a project where the dataset and table already exist is a safe no-op. On a fresh project it creates both. Expected output on first run:
+
+```
+==> Project : xdriplooker
+==> Dataset : health_metrics  (region: us-central1)
+==> Table   : cgm_data
+
+[create] Creating dataset 'health_metrics' in us-central1...
+[ok] Dataset created.
+[create] Creating table 'cgm_data'...
+[ok] Table created.
+
+Done. Verify in the BigQuery console:
+  https://console.cloud.google.com/bigquery?project=xdriplooker
+```
+
+The table is created with the following configuration:
+
+- **Partitioning:** `DAY` on `timestamp` — queries filtered by date range only scan the relevant day-partitions rather than the full table.
+- **Clustering:** `timestamp` — within each partition, rows are physically ordered by time, enabling block-level skipping for range queries.
+
+**Schema** (aligned to the full xDrip+ Nightscout entry payload):
 
 | Column | Type | Notes |
 |---|---|---|
@@ -39,19 +73,6 @@ To avoid using personal Google credentials, create a specific Service Account (S
 | `raw_data` | JSON | Entire unmodified entry object. Useful for fields added by future xDrip+ versions. |
 | `is_test` | BOOLEAN | **Crucial for filtering test data in Looker Studio.** Real xDrip+ traffic always sets this `FALSE`. Integration tests use a separate mechanism — see Phase 3.2. |
 
-To add missing columns to an existing table without losing data, use `ALTER TABLE` in the BigQuery console or CLI:
-
-```sql
-ALTER TABLE `xdriplooker.health_metrics.cgm_data`
-  ADD COLUMN IF NOT EXISTS entry_type STRING,
-  ADD COLUMN IF NOT EXISTS device STRING,
-  ADD COLUMN IF NOT EXISTS noise INT64,
-  ADD COLUMN IF NOT EXISTS filtered FLOAT64,
-  ADD COLUMN IF NOT EXISTS unfiltered FLOAT64,
-  ADD COLUMN IF NOT EXISTS rssi INT64,
-  ADD COLUMN IF NOT EXISTS date_string STRING;
-```
-
 ---
 
 ## Phase 2: Local Development Environment
@@ -66,11 +87,11 @@ echo "gcp-key.json" >> .gitignore
 ```
 
 ### 2.2 Conda Environment Setup
-This project uses a conda environment named `xdriplooker` (Python 3.14). The environment definition is exported to `environment.yml` in this repo.
+This project uses a conda environment named `xdriplooker` (Python 3.14). The environment definition is exported to `config/environment.yml` in this repo.
 
-To recreate the environment on a new machine:
+To recreate the environment on a new machine from the root of this repo:
 ```bash
-conda env create -f environment.yml
+conda env create -f config/environment.yml
 conda activate xdriplooker
 ```
 
@@ -79,9 +100,9 @@ To activate the existing environment:
 conda activate xdriplooker
 ```
 
-To update `environment.yml` after installing new packages:
+To update `config/environment.yml` after installing new packages:
 ```bash
-conda env export -n xdriplooker --no-builds > environment.yml
+conda env export -n xdriplooker --no-builds > config/environment.yml
 ```
 
 ### 2.3 Configure Local Authentication
@@ -97,7 +118,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
 
 ## Phase 3: Application Code & The Test Suite
 
-### 3.1 The Cloud Function (`main.py`)
+### 3.1 The Cloud Function (`src/main.py`)
 
 > **🔨 WORK NEEDED** — `main.py` requires significant changes to align with the xDrip+ request format. The current implementation handles a simple POST to `/`, uses a placeholder payload shape, and has no authentication. All three need to change.
 
@@ -146,18 +167,18 @@ The listener uses the Functions Framework. `bq_client` is initialized at module 
 
 ### 3.2 The Test Suite
 
-> **🔨 WORK NEEDED** — Unit tests in `test_main.py` must be updated to cover the new path routing, authentication header checking, and xDrip+ payload format. The two-layer testing structure (unit tests + manual `curl` integration) remains correct; only the test cases need rewriting.
+> **🔨 WORK NEEDED** — Unit tests in `tests/test_main.py` must be updated to cover the new path routing, authentication header checking, and xDrip+ payload format. The two-layer testing structure (unit tests + manual `curl` integration) remains correct; only the test cases need rewriting.
 
 The project has two complementary layers of testing:
 
 | Layer | Files | Hits GCP? | When to run |
 |---|---|---|---|
-| **Unit tests** (`pytest`) | `test_main.py`, `conftest.py` | No — BQ is fully mocked | Before every commit |
+| **Unit tests** (`pytest`) | `tests/test_main.py`, `tests/conftest.py` | No — BQ is fully mocked | Before every commit |
 | **Manual integration** (`curl`) | `functions-framework` + shell | Yes — real BigQuery write | When verifying end-to-end wiring |
 
 **Why two files for unit tests?**
 
-`bigquery.Client()` is called at module import time. pytest imports `test_main.py` → which imports `main.py` → which calls `bigquery.Client()` before any mock can intercept it. `conftest.py` is loaded by pytest *before* any test module is imported, so it sets `GOOGLE_APPLICATION_CREDENTIALS` in time for the constructor to succeed. Once the client exists, `test_main.py` mocks out `insert_rows_json` so no real API call is ever made.
+`bigquery.Client()` is called at module import time. pytest imports `tests/test_main.py` → which imports `src/main.py` → which calls `bigquery.Client()` before any mock can intercept it. `tests/conftest.py` is loaded by pytest *before* any test module is imported, so it sets `GOOGLE_APPLICATION_CREDENTIALS` in time for the constructor to succeed. Once the client exists, `tests/test_main.py` mocks out `insert_rows_json` so no real API call is ever made.
 
 A Flask app context fixture is also required because `jsonify()` needs one — under `functions-framework` Flask provides it automatically, but a bare pytest call does not.
 
@@ -172,7 +193,7 @@ The BigQuery client initializes at import time and resolves credentials via Goog
 ```bash
 conda activate xdriplooker
 export GOOGLE_APPLICATION_CREDENTIALS="$(pwd)/gcp-key.json"
-functions-framework --target=process_xdrip_payload --debug
+functions-framework --target=process_xdrip_payload --source=src/main.py --debug
 ```
 
 A successful start looks like:
@@ -228,7 +249,7 @@ A successful response looks like:
 To verify the row landed in BigQuery, run the included helper script from the project root (make sure the conda environment is active and `GOOGLE_APPLICATION_CREDENTIALS` is exported):
 
 ```bash
-python check_latest.py
+python scripts/check_latest.py
 ```
 
 Expected output:
@@ -275,7 +296,7 @@ Before deploying, confirm both testing layers are green:
 **Unit tests** — validates function logic; no credentials or running server needed:
 ```bash
 conda activate xdriplooker
-pytest test_main.py -v
+pytest -v
 ```
 
 **Manual integration test** — confirms live BigQuery connectivity (Phase 4):
@@ -377,7 +398,7 @@ Once all three steps above are confirmed, proceed to 5.4.
 
 #### Prerequisites
 
-**`requirements.txt` must exist in the project root.** GCP Cloud Functions installs Python dependencies from this file at build time. The conda `environment.yml` is only for local development — GCP does not use it. The file should contain only the production runtime dependencies (not pytest or other dev tools):
+**`src/requirements.txt` must exist.** GCP Cloud Functions installs Python dependencies from this file at build time. The conda `config/environment.yml` is only for local development — GCP does not use it. The file should contain only the production runtime dependencies (not pytest or other dev tools):
 
 ```text
 functions-framework==3.8.3
@@ -405,7 +426,7 @@ gcloud services enable \
   --project=xdriplooker
 ```
 
-**Verify `gcp-key.json` is excluded from the upload.** The `--source=.` flag packages the current directory. The `*.json` rule in `.gitignore` covers this — `gcloud` auto-generates a `.gcloudignore` from `.gitignore` on first deploy if one doesn't exist.
+**Verify `gcp-key.json` is excluded from the upload.** The `--source=src/` flag packages only the `src/` directory, so `gcp-key.json` (stored in the project root) is never included. The `*.json` rule in `.gitignore` also covers it as a belt-and-suspenders measure.
 
 #### Deploy command
 
@@ -417,7 +438,7 @@ gcloud functions deploy xdrip-listener \
   --gen2 \
   --runtime=python312 \
   --region=us-central1 \
-  --source=. \
+  --source=src/ \
   --entry-point=process_xdrip_payload \
   --trigger-http \
   --allow-unauthenticated \
@@ -443,7 +464,7 @@ url: https://us-central1-xdriplooker.cloudfunctions.net/xdrip-listener
 
 - **`--region=us-central1`** — Must match the region of your BigQuery dataset (also `us-central1`, set in Phase 1.2). Mismatched regions can introduce latency and cross-region egress costs.
 
-- **`--source=.`** — Uploads the current directory as the deployment package.
+- **`--source=src/`** — Uploads only the `src/` directory as the deployment package. This keeps tests, scripts, and config out of the deployed artifact.
 
 - **`--entry-point=process_xdrip_payload`** — The Python function GCP invokes on each HTTP request. Must match the function name in `main.py` exactly.
 
@@ -498,7 +519,7 @@ gcloud functions deploy xdrip-listener \
   --gen2 \
   --runtime=python312 \
   --region=us-central1 \
-  --source=. \
+  --source=src/ \
   --entry-point=process_xdrip_payload \
   --trigger-http \
   --allow-unauthenticated \
