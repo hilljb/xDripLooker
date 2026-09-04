@@ -8,7 +8,7 @@ The goal is to have a locally testable and GCP deployable function and BigQuery 
 * Access to the GCP console in your browser.
 * A region where you will set things up. I am using `us-central1`.
 * The `gcloud` console tool. This is installable via `brew` on a Mac. You will have to authenticate it with your Google account before much of what follows will work. (You need to re-auth if it hasn't been used in a while.)
-* `Conda` for Python. I am using [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) with the [conda forge](https://conda-forge.org/) repos.
+* `Conda` for Python. I am using [Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/main) with the [conda forge](https://conda-forge.org/) repos. This is for local testing against your GCP function.
 
 ## Architecture Overview
 * **Listener:** Python Cloud Function (Generation 2, HTTP Trigger), exposing a Nightscout-compatible REST endpoint (`/api/v1/entries`) so xDrip+ requires no customization.
@@ -18,7 +18,7 @@ The goal is to have a locally testable and GCP deployable function and BigQuery 
 
 ---
 
-## Phase 1: GCP Infrastructure & Security Setup
+## Phase 1: GCP Infrastructure & Security Setup ← Working
 
 ### 1.1 Create a Dedicated Service Account
 To avoid using personal Google credentials, create a specific Service Account (SA) that only has permission to write to BigQuery.
