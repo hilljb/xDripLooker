@@ -23,7 +23,7 @@ The goal is to have a locally testable and GCP deployable function and BigQuery 
 ### 1.1 Create a Dedicated Service Account
 To avoid using personal Google credentials, create a specific Service Account (SA) that only has permission to write to BigQuery.
 1. Navigate to **IAM & Admin > Service Accounts** in the GCP Console.
-2. Create a new SA (e.g., `xdrip-listener-sa@your-project-id.iam.gserviceaccount.com`).
+2. Create a new SA (e.g., `xdrip-listener-sa@xdriplooker.iam.gserviceaccount.com`). `xdriplooker` is the project name.
 3. Grant this SA the **BigQuery Data Editor** role.
 4. Generate and download a JSON key for this SA. Save it locally as `gcp-key.json` (ensure this is immediately added to your `.gitignore`).
 
